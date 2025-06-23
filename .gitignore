@@ -1,0 +1,25 @@
+# Виртуальное окружение
+venv/
+
+# Конфиденциальные данные
+.env
+*.db
+*.sqlite
+
+# Кэш Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Логи
+*.log
+*.tmp
+
+# Системные файлы
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
