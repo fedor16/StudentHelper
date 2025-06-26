@@ -1,8 +1,213 @@
+database.py
+from sqlalchemy import create_engine, Column, Integer, String, ForeignKey, Text, DateTime, Float, func
+from sqlalchemy.orm import declarative_base, relationship, sessionmaker
+from datetime import datetime
+
+Base = declarative_base()
+
+class User(Base):
+    __tablename__ = 'users'
+    id = Column(Integer, primary_key=True)
+    chat_id = Column(Integer, unique=True, nullable=False)
+    full_name = Column(String(100), nullable=False)
+    group_name = Column(String(50), nullable=True)
+    user_type = Column(String(20), nullable=False)  # 'student', 'helper', 'teacher'
+    rating = Column(Float, default=0.0)
+    completed_tasks = Column(Integer, default=0)
+    created_at = Column(DateTime, default=datetime.now)
+
+    tasks_created = relationship('Task', back_populates='student', foreign_keys='Task.student_id')
+    tasks_helped = relationship('Task', back_populates='helper', foreign_keys='Task.helper_id')
+
+class Subject(Base):
+    __tablename__ = 'subjects'
+    id = Column(Integer, primary_key=True)
+    name = Column(String(100), unique=True, nullable=False)
+    created_at = Column(DateTime, default=datetime.now)
+
+class Task(Base):
+    __tablename__ = 'tasks'
+    id = Column(Integer, primary_key=True)
+    title = Column(String(100), nullable=False)
+    description = Column(Text, nullable=False)
+    status = Column(String(20), default='new')  # 'new', 'in_progress', 'completed'
+    created_at = Column(DateTime, default=datetime.now)
+    photo_id = Column(String(200), nullable=True)
+    solution_text = Column(Text, nullable=True)
+    solution_file_id = Column(String(200), nullable=True)
+    rating = Column(Integer, nullable=True)
+    teacher_name = Column(String(100), nullable=False)
+
+    # Foreign keys
+    student_id = Column(Integer, ForeignKey('users.id'), nullable=False)
+    helper_id = Column(Integer, ForeignKey('users.id'), nullable=True)
+    subject_id = Column(Integer, ForeignKey('subjects.id'), nullable=False)
+
+    # Relationships
+    student = relationship('User', back_populates='tasks_created', foreign_keys=[student_id])
+    helper = relationship('User', back_populates='tasks_helped', foreign_keys=[helper_id])
+    subject = relationship('Subject')
+
+# Database initialization
+engine = create_engine('sqlite:///student_helper.db')
+Session = sessionmaker(bind=engine)
+
+def init_db():
+    Base.metadata.create_all(engine)
+    print("Database initialized successfully!")
+
+if __name__ == "__main__":
+    init_db()
+
+
+
+
+
+main.py
+import logging
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    ConversationHandler,
+    MessageHandler,
+    filters,
+    CallbackQueryHandler
+)
+from handlers import *
+from database import init_db
+from dotenv import load_dotenv
+import os
+
+# Загрузка переменных окружения
+load_dotenv()
+TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+
+# Настройка логгирования
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
+
+def main() -> None:
+    # Инициализация базы данных
+    init_db()
+    
+    # Создание приложения
+    application = ApplicationBuilder().token(TOKEN).build()
+    
+    # Обработчик регистрации
+    conv_handler = ConversationHandler(
+        entry_points=[CommandHandler('start', start)],
+        states={
+            REGISTER_STATE: [
+                CallbackQueryHandler(register_user, pattern='^(student|helper|teacher)$'),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, complete_registration)
+            ],
+        },
+        fallbacks=[CommandHandler('cancel', cancel)]
+    )
+    
+    # Обработчик создания задания (обратите внимание на allow_reentry=True)
+    task_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(create_task_start, pattern='^create_task$')],
+        states={
+            CREATE_TASK_TITLE: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, task_title_received),
+                CommandHandler('cancel', cancel)
+            ],
+            CREATE_TASK_DESC: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, task_description_received),
+                CommandHandler('cancel', cancel)
+            ],
+            CREATE_TASK_SUBJECT: [
+                CallbackQueryHandler(task_subject_received),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, task_subject_received),
+                CommandHandler('cancel', cancel)
+            ],
+            CREATE_TASK_TEACHER: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, task_teacher_received),
+                CommandHandler('cancel', cancel)
+            ],
+            CREATE_TASK_PHOTO: [
+                MessageHandler(filters.PHOTO, task_photo_received),
+                CommandHandler('skip', skip_photo),
+                CommandHandler('cancel', cancel)
+            ]
+        },
+        fallbacks=[
+            CommandHandler('cancel', cancel),
+            CallbackQueryHandler(back_to_student_menu, pattern='^back_to_student_menu$')
+        ],
+        allow_reentry=True  # Позволяет повторно запускать диалог создания задания
+    )
+    
+    # Обработчик отправки решения (также добавлен allow_reentry)
+    solution_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(submit_solution, pattern='^submit_solution_')],
+        states={
+            SEND_SOLUTION: [
+                MessageHandler(
+                    filters.TEXT | filters.PHOTO | filters.Document.ALL,
+                    receive_solution
+                ),
+                CommandHandler('cancel', cancel_solution)
+            ]
+        },
+        fallbacks=[CommandHandler('cancel', cancel_solution)],
+        allow_reentry=True
+    )
+    
+    # Регистрация обработчиков
+    application.add_handler(conv_handler)
+    application.add_handler(task_conv)
+    application.add_handler(solution_conv)
+    
+    # Обработчики меню
+    application.add_handler(CommandHandler('menu', menu_handler))
+    application.add_handler(MessageHandler(filters.Regex(r'^Меню$'), menu_handler))
+    
+    # Обработчики для студента
+    application.add_handler(CallbackQueryHandler(show_student_tasks, pattern='^my_tasks$'))
+    application.add_handler(CallbackQueryHandler(show_helper_rating, pattern='^helper_rating$'))
+    application.add_handler(CallbackQueryHandler(delete_task, pattern='^delete_task_'))
+    application.add_handler(CallbackQueryHandler(rate_task, pattern='^rate_task_'))
+    application.add_handler(CallbackQueryHandler(set_rating, pattern='^set_rating_'))
+    application.add_handler(CallbackQueryHandler(refresh_student_menu, pattern='^refresh_student_menu$'))
+    application.add_handler(CallbackQueryHandler(back_to_student_menu, pattern='^back_to_student_menu$'))
+    
+    # Обработчики для помогающего студента
+    application.add_handler(CallbackQueryHandler(take_task, pattern='^take_task_'))
+    application.add_handler(CallbackQueryHandler(abandon_task, pattern='^abandon_task_'))
+    application.add_handler(CallbackQueryHandler(helper_menu, pattern='^refresh_helper_menu$'))
+    application.add_handler(CallbackQueryHandler(helper_menu, pattern='^back_to_helper_menu$'))
+    application.add_handler(CallbackQueryHandler(show_helper_tasks, pattern='^helper_my_tasks$'))
+    application.add_handler(CallbackQueryHandler(show_available_tasks, pattern='^available_tasks$'))
+    
+    # Обработчики для преподавателя
+    application.add_handler(CallbackQueryHandler(teacher_menu, pattern='^refresh_teacher_menu$'))
+    application.add_handler(CallbackQueryHandler(back_to_teacher_menu, pattern='^back_to_teacher_menu$'))
+    application.add_handler(CallbackQueryHandler(show_teacher_student_tasks, pattern='^teacher_student_tasks$'))
+    application.add_handler(CallbackQueryHandler(show_teacher_students, pattern='^teacher_students$'))
+    application.add_handler(CallbackQueryHandler(show_teacher_helpers, pattern='^teacher_helpers$'))
+    
+    # Запуск бота
+    application.run_polling()
+
+if __name__ == '__main__':
+    main()
+
+
+
+
+
+
+
+handlers.py
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import CallbackContext, ConversationHandler, CommandHandler, MessageHandler, filters, CallbackQueryHandler
 from database import Session, User, Task, Subject, func
 from datetime import datetime
-from sqlalchemy.orm import joinedload
 import re
 import logging
 
@@ -10,7 +215,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 # Состояния диалога
-REGISTER_STATE, CREATE_TASK_TITLE, CREATE_TASK_DESC, CREATE_TASK_SUBJECT, CREATE_TASK_TEACHER, CREATE_TASK_DEADLINE, CREATE_TASK_PHOTO = range(7)
+REGISTER_STATE, CREATE_TASK_TITLE, CREATE_TASK_DESC, CREATE_TASK_SUBJECT, CREATE_TASK_TEACHER, CREATE_TASK_PHOTO = range(6)
 SEND_SOLUTION, = range(1, 2)
 
 # Глобальная клавиатура с кнопкой "Меню"
@@ -143,6 +348,7 @@ async def student_menu(update: Update, context: CallbackContext):
         [InlineKeyboardButton("📝 Создать задание", callback_data='create_task')],
         [InlineKeyboardButton("📋 Мои задания", callback_data='my_tasks')],
         [InlineKeyboardButton("🏆 Рейтинг помощников", callback_data='helper_rating')],
+        [InlineKeyboardButton("🔄 Обновить", callback_data='refresh_student_menu')]
     ]
     
     if isinstance(update, Update) and update.message:
@@ -170,12 +376,9 @@ async def show_student_tasks(update: Update, context: CallbackContext):
         
         tasks = session.query(Task).filter_by(student_id=user.id).order_by(Task.status, Task.created_at).all()
         
-    if not tasks:
-        await query.edit_message_text(
-           "❗ У вас нет заданий.\n\n"
-           "Используйте /menu, чтобы вернуться в меню."
-        )
-        return
+        if not tasks:
+            await query.edit_message_text("У вас нет созданных заданий")
+            return
         
         message = ["📋 Ваши задания:"]
         keyboard = []
@@ -188,7 +391,6 @@ async def show_student_tasks(update: Update, context: CallbackContext):
                 f"🏷 Предмет: {task.subject.name}",
                 f"👨‍🏫 Преподаватель: {task.teacher_name}",
                 f"📅 Создано: {task.created_at.strftime('%d.%m.%Y %H:%M')}",
-                f"⏰ Срок: {task.deadline.strftime('%d.%m.%Y')}",
                 f"🔄 Статус: {task.status}"
             ]
             
@@ -337,6 +539,7 @@ async def helper_menu(update: Update, context: CallbackContext):
     keyboard = [
         [InlineKeyboardButton("📋 Мои задания", callback_data='helper_my_tasks')],
         [InlineKeyboardButton("🔍 Доступные задания", callback_data='available_tasks')],
+        [InlineKeyboardButton("🔄 Обновить", callback_data='refresh_helper_menu')]
     ]
     
     if isinstance(update, Update) and update.message:
@@ -355,138 +558,40 @@ async def show_available_tasks(update: Update, context: CallbackContext):
     query = update.callback_query
     await query.answer()
     chat_id = update.effective_chat.id
-
-    # Проверяем, что пользователь — помощник и сразу выгружаем новые задания
+    
     with Session() as session:
-        helper = session.query(User).filter_by(
-            chat_id=chat_id, user_type='helper'
-        ).first()
-        if not helper:
+        # Проверяем, что пользователь - помогающий студент
+        user = session.query(User).filter_by(chat_id=chat_id, user_type='helper').first()
+        if not user:
             await query.edit_message_text("❌ Доступно только для помогающих студентов")
             return
+        
+        # Получаем новые задания (status='new')
         tasks = session.query(Task).filter_by(status='new').all()
-
-    # Если нет ни одного нового задания — сразу даём сообщение и инструкцию /menu
-    if not tasks:
-        await query.edit_message_text(
-            "❗ Нет доступных заданий.\n\n"
-            "Используйте /menu, чтобы вернуться в меню."
-        )
-        return
-
-    # Иначе — показываем меню фильтрации по предметам + «Все задания»
-    with Session() as session:
-        subjects = session.query(Subject).all()
-
-    keyboard = [
-        [InlineKeyboardButton("Все задания", callback_data="filter_tasks_all")]
-    ]
-    for subj in subjects:
-        keyboard.append([
-            InlineKeyboardButton(subj.name, callback_data=f"filter_tasks_{subj.id}")
-        ])
-    keyboard.append([InlineKeyboardButton("🔙 В меню", callback_data='back_to_helper_menu')])
-
-    await query.edit_message_text(
-        "🔍 Выберите предмет или «Все задания»:",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-
-
-async def filter_tasks(update: Update, context: CallbackContext):
-    query = update.callback_query
-    await query.answer()
-    data = query.data           # e.g. "filter_tasks_all" или "filter_tasks_3"
-    parts = data.split("_")     # ["filter","tasks","all"] или ["filter","tasks","3"]
-    key = parts[-1]             # "all" или "3"
-
-    with Session() as session:
-        if key == "all":
-            tasks = session.query(Task).filter_by(status='new').all()
-        else:
-            subject_id = int(key)
-            tasks = session.query(Task).filter_by(
-                status='new',
-                subject_id=subject_id
-            ).all()
-
-    if not tasks:
-        await query.edit_message_text("Нет доступных заданий.")
-        return
-
-    lines, kb = [], []
-    for i, t in enumerate(tasks, 1):
-        lines.append(
-            f"{i}. <b>{t.title}</b>\n"
-            f"{t.description}\n"
-            f"⏰ Дедлайн: {t.deadline.strftime('%d.%m.%Y')}\n"
-        )
-        kb.append([InlineKeyboardButton(
-            f"{i} – {t.title}", 
-            callback_data=f"choose_task_{t.id}"
-        )])
-
-    kb.append([InlineKeyboardButton("🔙 В меню", callback_data='back_to_helper_menu')])
-    await query.edit_message_text(
-        "\n".join(lines),
-        parse_mode='HTML',
-        reply_markup=InlineKeyboardMarkup(kb)
-    )
-
-
-
-async def choose_task(update: Update, context: CallbackContext):
-    query = update.callback_query
-    await query.answer()
-    task_id = int(query.data.split("_")[2])
-
-    # Помещаем всё в одну сессию, меняем статус и helper_id
-    with Session() as session:
-        task = (
-            session.query(Task)
-            .options(joinedload(Task.subject), joinedload(Task.student))
-            .get(task_id)
-        )
-        helper = session.query(User).filter_by(
-            chat_id=update.effective_chat.id, user_type='helper'
-        ).first()
-
-        # переводим в in_progress
-        task.status    = 'in_progress'
-        task.helper_id = helper.id
-        session.commit()
-
-        # готовим текст
-        text = (
-            f"<b>Вы выбрали задание:</b>\n\n"
-            f"<b>Тема:</b> {task.title}\n"
-            f"<b>Описание:</b>\n{task.description}\n\n"
-            f"🏷 <b>Предмет:</b> {task.subject.name}\n"
-            f"👨‍🎓 <b>Студент:</b> {task.student.full_name}\n"
-            f"⏰ <b>Дедлайн:</b> {task.deadline.strftime('%d.%m.%Y')}\n"
-        )
-
-    # Редактируем сообщение помощнику (только текст + кнопка меню)
-    await query.edit_message_text(
-        text=text,
-        parse_mode='HTML',
-        reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton("🔙 В меню", callback_data='back_to_helper_menu')
-        ]])
-    )
-
-    # Уведомляем студента
-    try:
-        await context.bot.send_message(
-            chat_id=task.student.chat_id,
-            text=(
-                f"🎉 Вашу задачу «{task.title}» взял в работу "
-                f"помощник: {helper.full_name}"
+        
+        if not tasks:
+            await query.edit_message_text("Нет доступных заданий")
+            return
+        
+        message = ["🔍 Доступные задания:\n"]
+        keyboard = []
+        
+        for task in tasks:
+            message.append(
+                f"📌 {task.title}\n"
+                f"📝 {task.description[:50]}...\n"
+                f"🏷 Предмет: {task.subject.name}\n"
             )
-        )
-    except Exception as e:
-        logger.error(f"Ошибка уведомления студента: {e}")
-
+            keyboard.append([InlineKeyboardButton(
+                f"Взять задание: {task.title[:20]}...", 
+                callback_data=f"take_task_{task.id}"
+            )])
+        
+        keyboard.append([InlineKeyboardButton("🔙 В меню", callback_data='back_to_helper_menu')])
+        
+        await query.edit_message_text(
+            text="\n".join(message),
+            reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def take_task(update: Update, context: CallbackContext):
     query = update.callback_query
@@ -528,117 +633,52 @@ async def take_task(update: Update, context: CallbackContext):
         # Показываем меню помощника
         await helper_menu(update, context)
 
-
-async def show_helper_tasks(update, context):
+async def show_helper_tasks(update: Update, context: CallbackContext):
     query = update.callback_query
     await query.answer()
-    helper_chat = update.effective_chat.id
-
+    chat_id = update.effective_chat.id
+    
     with Session() as session:
-        helper = session.query(User).filter_by(
-            chat_id=helper_chat, user_type='helper'
-        ).first()
-        if not helper:
+        user = session.query(User).filter_by(chat_id=chat_id, user_type='helper').first()
+        if not user:
             await query.edit_message_text("❌ Доступно только для помогающих студентов")
             return
-        tasks = session.query(Task).filter_by(helper_id=helper.id).all()
-
-    if not tasks:
+        
+        # Получаем задания, которые взял этот помощник
+        tasks = session.query(Task).filter_by(helper_id=user.id).all()
+        
+        if not tasks:
+            await query.edit_message_text("У вас нет взятых заданий")
+            return
+        
+        message = ["📋 Ваши задания:\n"]
+        keyboard = []
+        
+        for task in tasks:
+            message.append(
+                f"📌 {task.title}\n"
+                f"📝 {task.description[:50]}...\n"
+                f"🏷 Предмет: {task.subject.name}\n"
+                f"👤 Студент: {task.student.full_name}\n"
+                f"🔄 Статус: {task.status}\n"
+            )
+            
+            # Для заданий в работе добавляем кнопки действий
+            if task.status == 'in_progress':
+                keyboard.append([
+                    InlineKeyboardButton(
+                        f"📤 Отправить решение '{task.title[:10]}...'", 
+                        callback_data=f"submit_solution_{task.id}"),
+                    InlineKeyboardButton(
+                        f"❌ Отказаться '{task.title[:10]}...'", 
+                        callback_data=f"abandon_task_{task.id}")
+                ])
+        
+        keyboard.append([InlineKeyboardButton("🔙 В меню", callback_data='back_to_helper_menu')])
+        
         await query.edit_message_text(
-            "❗ У вас нет взятых заданий.\n\n"
-            "Используйте /menu, чтобы вернуться в меню."
-        )
-        return
-
-    lines, kb = [], []
-    for i, t in enumerate(tasks, 1):
-        title = f"<s>{t.title}</s>" if t.status == 'completed' else t.title
-        lines.append(f"{i}. {title} — ⏰ {t.deadline.strftime('%d.%m.%Y')}")
-
-        if t.status == 'in_progress':
-            kb.append([
-                InlineKeyboardButton(
-                    f"📤 Решение {i}",               # <- сокращённая кнопка
-                    callback_data=f"submit_solution_{t.id}"
-                ),
-                InlineKeyboardButton(
-                    "ℹ️",
-                    callback_data=f"info_task_{t.id}"
-                ),
-                InlineKeyboardButton(
-                    "❌",
-                    callback_data=f"abandon_task_{t.id}"
-                )
-            ])
-
-    kb.append([InlineKeyboardButton("🔙 В меню", callback_data='back_to_helper_menu')])
-
-    await query.edit_message_text(
-        "\n".join(lines),
-        parse_mode='HTML',
-        reply_markup=InlineKeyboardMarkup(kb)
-    )
-
-
-
-async def info_task(update: Update, context: CallbackContext):
-    query = update.callback_query
-    await query.answer()
-    task_id = int(query.data.split("_")[2])
-
-    # Собираем данные внутри сессии
-    with Session() as session:
-        t = session.query(Task).options(
-            joinedload(Task.subject),
-            joinedload(Task.student)
-        ).get(task_id)
-        text = (
-            f"<b>Информация по заданию:</b>\n\n"
-            f"<b>Тема:</b> {t.title}\n"
-            f"<b>Описание:</b>\n{t.description}\n\n"
-            f"🏷 <b>Предмет:</b> {t.subject.name}\n"
-            f"👨‍🎓 <b>Студент:</b> {t.student.full_name}\n"
-            f"⏰ <b>Дедлайн:</b> {t.deadline.strftime('%d.%m.%Y')}\n"
-            f"🔄 <b>Статус:</b> {t.status}"
-        )
-
-    # Клавиатура с одной кнопкой «В меню»
-    menu_kb = InlineKeyboardMarkup([[
-        InlineKeyboardButton("🔙 В меню", callback_data='back_to_helper_menu')
-    ]])
-
-    # Отправляем детальное сообщение с кнопкой меню
-    await context.bot.send_message(
-        chat_id=update.effective_chat.id,
-        text=text,
-        parse_mode='HTML',
-        reply_markup=menu_kb
-    )
-
-
-async def view_my_task(update: Update, context: CallbackContext):
-    query = update.callback_query
-    await query.answer()
-    tid = int(query.data.split("_")[3])
-    with Session() as session:
-        t = session.query(Task).get(tid)
-
-    text = (
-        f"<b>{t.title}</b>\n\n"
-        f"{t.description}\n\n"
-        f"🏷 {t.subject.name}\n"
-        f"👨‍🎓 {t.student.full_name}\n"
-        f"⏰ Дедлайн: {t.deadline.strftime('%d.%m.%Y')}\n"
-        f"🔄 Статус: {t.status}"
-    )
-    kb = [
-        [
-          InlineKeyboardButton("📤 Отправить решение", callback_data=f"submit_solution_{tid}"),
-          InlineKeyboardButton("❌ Отказаться",          callback_data=f"abandon_task_{tid}")
-        ],
-        [InlineKeyboardButton("🔙 В меню", callback_data='back_to_helper_menu')]
-    ]
-    await query.edit_message_text(text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(kb))
+            text="\n".join(message),
+            reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def abandon_task(update: Update, context: CallbackContext):
     query = update.callback_query
@@ -830,27 +870,7 @@ async def task_subject_received(update: Update, context: CallbackContext) -> int
 async def task_teacher_received(update: Update, context: CallbackContext) -> int:
     context.user_data['teacher_name'] = update.message.text
     await update.message.reply_text(
-        "Укажите срок выполнения в формате ДД.MM.ГГГГ\n"
-        "(дата должна быть > сегодняшнего дня):")
-    return CREATE_TASK_DEADLINE
-
-from datetime import datetime as dt
-
-async def task_deadline_received(update, context) -> int:
-    text = update.message.text.strip()
-    try:
-        deadline = dt.strptime(text, "%d.%m.%Y")
-    except ValueError:
-        await update.message.reply_text("❌ Неверный формат. Используйте ДД.MM.ГГГГ:")
-        return CREATE_TASK_DEADLINE
-
-    if deadline.date() <= dt.now().date():
-        await update.message.reply_text("❌ Дата должна быть в будущем. Попробуйте снова:")
-        return CREATE_TASK_DEADLINE
-
-    context.user_data['deadline'] = deadline
-    await update.message.reply_text(
-        "Хотите добавить фото к заданию?\n"
+        "Хотите добавить фото к заданию?\n\n"
         "Отправьте фото или нажмите /skip чтобы пропустить")
     return CREATE_TASK_PHOTO
 
@@ -881,7 +901,6 @@ async def task_photo_received(update: Update, context: CallbackContext) -> int:
             description=description,
             subject_id=subject_id,
             teacher_name=teacher_name,
-            deadline=context.user_data['deadline'],
             student_id=user.id,
             photo_id=photo_id,
             status='new'
@@ -923,6 +942,7 @@ async def teacher_menu(update: Update, context: CallbackContext):
         [InlineKeyboardButton("📋 Задания моих студентов", callback_data='teacher_student_tasks')],
         [InlineKeyboardButton("👨‍🎓 Студенты, загрузившие задания", callback_data='teacher_students')],
         [InlineKeyboardButton("👨‍🏫 Помогающие студенты по моим заданиям", callback_data='teacher_helpers')],
+        [InlineKeyboardButton("🔄 Обновить", callback_data='refresh_teacher_menu')]
     ]
     
     if isinstance(update, Update) and update.message:

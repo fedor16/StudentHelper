@@ -31,6 +31,7 @@ class Task(Base):
     description = Column(Text, nullable=False)
     status = Column(String(20), default='new')  # 'new', 'in_progress', 'completed'
     created_at = Column(DateTime, default=datetime.now)
+    deadline    = Column(DateTime, nullable=False)
     photo_id = Column(String(200), nullable=True)
     solution_text = Column(Text, nullable=True)
     solution_file_id = Column(String(200), nullable=True)
