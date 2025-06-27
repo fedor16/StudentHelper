@@ -68,11 +68,12 @@ def main() -> None:
                 MessageHandler(filters.TEXT & ~filters.COMMAND, task_deadline_received),
                 CommandHandler('cancel', cancel)
             ],
-            CREATE_TASK_PHOTO: [
-                MessageHandler(filters.PHOTO, task_photo_received),
-                CommandHandler('skip', skip_photo),
+            CREATE_TASK_ATTACHMENT: [
+                MessageHandler(filters.PHOTO | filters.Document.ALL, task_attachment_received),
+                CommandHandler('skip', skip_attachment),
                 CommandHandler('cancel', cancel)
             ]
+
         },
         fallbacks=[
             CommandHandler('cancel', cancel),
